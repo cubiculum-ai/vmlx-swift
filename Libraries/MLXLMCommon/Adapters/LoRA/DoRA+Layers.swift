@@ -10,18 +10,30 @@ import MLX
 import MLXNN
 
 /// Performs the forward pass for a DoRA linear layer.
+/// DoRA's per-output-channel rescaling, `magnitude / norm(W + scale * Bt At, axis: 1)`.
+///
+/// Split out of `forward` so a layer that can prove its inputs are fixed may hydrate it ONCE. It is
+/// by far the expensive half: materializing `adapted` is a dense [out, in] outer-product expansion
+/// plus an add, and the norm is a full reduction over it — all three per token, against a forward
+/// whose own matmul is a single [out, in] pass.
+private func doraDirectionScale(
+    weight: MLXArray, loraA: MLXArray, loraB: MLXArray,
+    scale: Float, magnitude: MLXArray
+) -> MLXArray {
+    let adapted = weight + matmul(scale * loraB.T, loraA.T)
+    return magnitude / norm(adapted, axis: 1)
+}
+
 private func forward(
     x: MLXArray, y: MLXArray,
-    weight: MLXArray, bias: MLXArray?,
+    bias: MLXArray?,
     loraA: MLXArray, loraB: MLXArray,
-    scale: Float, magnitude: MLXArray
+    scale: Float, directionScale: MLXArray
 ) -> MLXArray {
     let z = matmul(matmul(x, loraA), loraB)
     var out = y + (scale * z).asType(x.dtype)
 
-    let adapted = weight + matmul(scale * loraB.T, loraA.T)
-    let denom = norm(adapted, axis: 1)
-    out *= (magnitude / denom).asType(x.dtype)
+    out *= directionScale.asType(x.dtype)
 
     return if let bias {
         out + bias
@@ -111,9 +123,12 @@ public class DoRALinear: Linear, LoRALayer {
         let y = matmul(x, weight.T)
         return forward(
             x: x, y: y,
-            weight: weight, bias: bias,
+            bias: bias,
             loraA: loraA, loraB: loraB,
-            scale: scale, magnitude: magnitude
+            scale: scale,
+            directionScale: doraDirectionScale(
+                weight: weight, loraA: loraA, loraB: loraB,
+                scale: scale, magnitude: magnitude)
         )
     }
 }
@@ -205,15 +220,51 @@ public class QDoRALinear: QuantizedLinear, LoRALayer {
         )
     }
 
+    /// DoRA's rescaling vector, hydrated once for inference and recomputed while training.
+    ///
+    /// Unlike `denseBaseWeight` this depends on `loraA`, `loraB` and `magnitude`, which DO change —
+    /// an optimizer rewrites them every step, and loading an adapter writes all three. So it is
+    /// cached only in EVAL mode, and `didSetTrain` drops it on any mode change.
+    ///
+    /// Caching it while training would be worse than stale: `magnitude / norm(W + scale * Bt At)` is
+    /// exactly where DoRA's gradient with respect to the low-rank factors flows, so a constant here
+    /// does not merely use old numbers, it severs that gradient and silently trains a different
+    /// model. That is why the gate is the training flag and not a performance switch.
+    ///
+    /// Loading a DIFFERENT adapter is safe without any hook: `LoRAContainer.load(into:)` goes
+    /// through `replaceLayers`, which constructs new layer instances, so the cache cannot outlive
+    /// the parameters it was derived from.
+    private var cachedDirectionScale: MLXArray?
+
+    public override func didSetTrain(_ mode: Bool) {
+        super.didSetTrain(mode)
+        cachedDirectionScale = nil
+    }
+
+    private func directionScale() -> MLXArray {
+        if training {
+            return doraDirectionScale(
+                weight: baseWeight(), loraA: loraA, loraB: loraB,
+                scale: scale, magnitude: magnitude)
+        }
+        if let cached = cachedDirectionScale { return cached }
+        let computed = doraDirectionScale(
+            weight: baseWeight(), loraA: loraA, loraB: loraB,
+            scale: scale, magnitude: magnitude)
+        eval(computed)
+        cachedDirectionScale = computed
+        return computed
+    }
+
     public override func callAsFunction(_ x: MLXArray) -> MLXArray {
         let y = quantizedMM(
             x, weight, scales: scales, biases: biases, groupSize: groupSize, bits: bits,
             mode: mode)
         return forward(
             x: x, y: y,
-            weight: baseWeight(), bias: bias,
+            bias: bias,
             loraA: loraA, loraB: loraB,
-            scale: scale, magnitude: magnitude
+            scale: scale, directionScale: directionScale()
         )
     }
 }

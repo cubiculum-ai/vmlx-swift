@@ -60,7 +60,18 @@ enum PEFTAdapter {
     /// a shape mismatch or, where dimensions happen to agree, quietly compute a different function
     /// — which is why the round trip is checked numerically in the tests rather than by loading
     /// successfully.
-    static func translate(weights: [String: MLXArray]) -> [String: MLXArray] {
+    /// On the MAGNITUDES: a DoRA adapter carries one `lora_magnitude_vector` per target, and
+    /// dropping them is not a harmless omission. `configuration(from:weights:)` reads `use_dora` and
+    /// builds `QDoRALinear`/`DoRALinear` layers either way, whose forward scales the output by
+    /// `magnitude / norm(W + scale * Bt At)`. With the trained magnitudes discarded, `magnitude`
+    /// keeps the value `init` derived from the BASE weight — so the adapter loads, generates, and
+    /// silently computes a different function than the one that was trained. PEFT writes the key
+    /// bare in current versions and with a `.weight` suffix in older ones; both are accepted. They
+    /// are 1-D, so the transpose below leaves them alone.
+    ///
+    /// `dora` gates it because a plain LoRA model has no `m` slot: emitting the key there would fail
+    /// `load(into:)`'s `.noUnusedKeys` verification rather than being quietly ignored.
+    static func translate(weights: [String: MLXArray], dora: Bool = false) -> [String: MLXArray] {
         var out: [String: MLXArray] = [:]
         out.reserveCapacity(weights.count)
         for (key, value) in weights {
@@ -72,8 +83,12 @@ enum PEFTAdapter {
                 k = String(k.dropLast(".lora_A.weight".count)) + ".lora_a"
             } else if k.hasSuffix(".lora_B.weight") {
                 k = String(k.dropLast(".lora_B.weight".count)) + ".lora_b"
+            } else if dora, k.hasSuffix(".lora_magnitude_vector") {
+                k = String(k.dropLast(".lora_magnitude_vector".count)) + ".m"
+            } else if dora, k.hasSuffix(".lora_magnitude_vector.weight") {
+                k = String(k.dropLast(".lora_magnitude_vector.weight".count)) + ".m"
             } else {
-                continue                       // biases, magnitudes, anything else: not ours
+                continue                       // biases, anything else: not ours
             }
             out[k] = value.ndim == 2 ? value.transposed(1, 0) : value
         }
@@ -206,8 +221,10 @@ enum PEFTAdapter {
 /// orientation of the translated factors is precisely the thing that must be checked numerically
 /// rather than by a successful load. This exposes the three pure functions and nothing else.
 public enum PEFTAdapterTestBridge {
-    public static func translate(_ weights: [String: MLXArray]) -> [String: MLXArray] {
-        PEFTAdapter.translate(weights: weights)
+    public static func translate(
+        _ weights: [String: MLXArray], dora: Bool = false
+    ) -> [String: MLXArray] {
+        PEFTAdapter.translate(weights: weights, dora: dora)
     }
 
     public static func detect(_ configuration: Data) -> PEFTConfigurationBox? {
