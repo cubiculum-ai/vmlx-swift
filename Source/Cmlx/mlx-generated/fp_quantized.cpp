@@ -79,8 +79,7 @@ struct fp8_e4m3 {
     uint32_t sign = f_bits & 0x80000000;
     f_bits ^= sign;
     if (f_bits >= fp8_max) {
-      // Default behavior saturates to min/max
-      bits = 0x7E;
+      bits = (f_bits > 0x7F800000) ? 0x7F : 0x7E;
     } else {
       if (f_bits < (121 << 23)) {
         f_bits = as_type<uint32_t>(
@@ -135,12 +134,16 @@ struct fp8_e8m0 {
   }
 
   operator bfloat16_t() thread {
-    uint16_t out = (bits == 0 ? 0x40 : (static_cast<uint16_t>(bits) << 7));
+    uint16_t out = (bits == 0)
+        ? 0x40
+        : (bits == 0xFF ? 0x7FC0 : (static_cast<uint16_t>(bits) << 7));
     return as_type<bfloat16_t>(out);
   }
 
   operator float() thread {
-    uint32_t out = (bits == 0 ? 0x400000 : (static_cast<uint16_t>(bits) << 23));
+    uint32_t out = (bits == 0)
+        ? 0x400000
+        : (bits == 0xFF ? 0x7FC00000 : (static_cast<uint16_t>(bits) << 23));
     return as_type<float>(out);
   }
 
@@ -1048,6 +1051,7 @@ template <
     const int group_size,
     const int bits,
     const bool aligned_N,
+    typename U = T,
     const bool has_global_scale = false,
     const int BM = 32,
     const int BK = 32,
@@ -1058,7 +1062,7 @@ METAL_FUNC void fp_qmm_t_impl(
     const device uint8_t* scales,
     const device float* global_scale,
     const device T* x,
-    device T* y,
+    device U* y,
     threadgroup T* Xs,
     threadgroup TW* Ws,
     const constant int& K,
@@ -1083,7 +1087,7 @@ METAL_FUNC void fp_qmm_t_impl(
 
   // Instantiate the appropriate BlockMMA and Loader
   using mma_t = mlx::steel::
-      BlockMMA<T, T, BM, BN, BK, WM, WN, false, true, BK_padded, BK_padded>;
+      BlockMMA<T, U, BM, BN, BK, WM, WN, false, true, BK_padded, BK_padded>;
   using loader_x_t =
       mlx::steel::BlockLoader<T, BM, BK, BK_padded, 1, WM * WN * SIMD_SIZE>;
   // Use shortcut when loading fp4 quants to half weights
@@ -2018,7 +2022,16 @@ template <
         s_strides,
         tid);
   }
-  fp_qmm_t_impl<T, group_size, bits, aligned_N, has_global_scale, BM, BK, BN>(
+  fp_qmm_t_impl<
+      T,
+      group_size,
+      bits,
+      aligned_N,
+      T,
+      has_global_scale,
+      BM,
+      BK,
+      BN>(
       w,
       scales,
       global_scale,
@@ -2337,7 +2350,16 @@ template <
       w_strides,
       s_strides,
       tid);
-  fp_qmm_t_impl<T, group_size, bits, aligned_N, has_global_scale, BM, BK, BN>(
+  fp_qmm_t_impl<
+      T,
+      group_size,
+      bits,
+      aligned_N,
+      T,
+      has_global_scale,
+      BM,
+      BK,
+      BN>(
       w,
       scales,
       global_scale,
@@ -2367,7 +2389,7 @@ template <
     const device uint32_t* w [[buffer(0)]],
     const device uint8_t* scales [[buffer(1)]],
     const device T* x [[buffer(2)]],
-    device T* y [[buffer(3)]],
+    device float* y [[buffer(3)]],
     const constant int& K [[buffer(4)]],
     const constant int& N [[buffer(5)]],
     const constant int& M [[buffer(6)]],
@@ -2398,7 +2420,7 @@ template <
   scales += k_start / group_size;
   y += tid.z * static_cast<int64_t>(split_k_partition_stride);
 
-  fp_qmm_t_impl<T, group_size, bits, aligned_N, false, BM, BK, BN>(
+  fp_qmm_t_impl<T, group_size, bits, aligned_N, float, false, BM, BK, BN>(
       (const device uint32_t*)wl,
       scales,
       nullptr,
