@@ -73,14 +73,29 @@ let mlxLMCommonSwiftSettings: [SwiftSetting] = {
         "mlx/mlx/backend/cpu/sdpa_highway_dispatch.cpp",
     ]
 
-    // Google Highway SIMD kernels in the CPU backend, on x86-64 for now. In a
-    // manifest, #if arch tests the host, which is the target in a native build.
-    // VMLX_HWY_ALL_TARGETS=1 compiles every attainable target, EMU128 included, for the kernel tests.
-    #if arch(x86_64)
-        let highwayDefines: [CXXSetting] =
-            [.define("MLX_USE_HIGHWAY_KERNELS"), .define("HWY_DISABLE_PCLMUL_AES")]
-            + (Context.environment["VMLX_HWY_ALL_TARGETS"] == "1"
-                ? [.define("HWY_COMPILE_ALL_ATTAINABLE")] : [])
+    // Google Highway SIMD kernels in the CPU backend, on Linux x86-64 and arm64. In a manifest,
+    // #if arch tests the host, which is the target in a native build. VMLX_HWY_ALL_TARGETS=1
+    // compiles every attainable target, EMU128 included, for the kernel tests. VMLX_NO_HIGHWAY=1
+    // builds without Highway's kernels and the CPU pool: MLX's scalar CPU code, which ULPBaseline
+    // is measured on. Give such a build a scratch path of its own, as
+    // scripts/run-cpu-kernel-tests.sh does (.build/no-hwy): in a shared one, each switch recompiles
+    // all of Cmlx.
+    #if arch(x86_64) || arch(arm64)
+        let highwayDefines: [CXXSetting] = {
+            if Context.environment["VMLX_NO_HIGHWAY"] == "1" {
+                return []
+            }
+            var defines: [CXXSetting] = [
+                .define("MLX_USE_HIGHWAY_KERNELS"), .define("HWY_DISABLE_PCLMUL_AES"),
+                // No SVE until the dispatched kernels are vector-length agnostic. Also set on
+                // x86-64, since #if arch tests the host, not the target; there it does nothing.
+                .define("HWY_DISABLED_TARGETS", to: "HWY_ALL_SVE"),
+            ]
+            if Context.environment["VMLX_HWY_ALL_TARGETS"] == "1" {
+                defines.append(.define("HWY_COMPILE_ALL_ATTAINABLE"))
+            }
+            return defines
+        }()
     #else
         let highwayDefines: [CXXSetting] = []
     #endif
@@ -233,8 +248,8 @@ let cmlx = Target.target(
         // vendored library, include header only
         "json",
 
-        // Google Highway, a submodule. Linux x86-64 compiles its runtime sources through the
-        // wrappers in highway-runtime/, and nothing else of it compiles anywhere.
+        // Google Highway, a submodule. Builds with Highway kernels compile its runtime sources
+        // through the wrappers in highway-runtime/, and nothing else of it compiles anywhere.
         "highway",
 
         // vendored library
