@@ -229,12 +229,38 @@ public final class BailingV3KDAAttention: Module {
     public var fusedConv: Bool = KDAConvRuntime.enabled
     /// Tests compare the one-dispatch decode step against the stock path on one layer.
     var fusedDecodeForTesting = true
+    /// Whether to pack `q|k|v` into one projection, decided at the FIRST forward and not after.
+    ///
+    /// Unlike ``fusedConv``, this cannot be flipped to measure a built layer both ways: packing
+    /// FREES the three originals, so the stock path stops being computable once it has run. Measure
+    /// both ways with `VMLX_GLM5_PROJECTION_GROUPS` in separate processes instead.
+    public var groupedProjections: Bool = KDAProjectionGroupRuntime.enabled
     let safeGate: Bool
     let lowerBound: Float
 
     @ModuleInfo(key: "q_proj") var qProj: Linear
     @ModuleInfo(key: "k_proj") var kProj: Linear
     @ModuleInfo(key: "v_proj") var vProj: Linear
+
+    /// `q|k|v` packed into one projection, built from the three above on first use.
+    ///
+    /// Built LAZILY rather than in `init` because `init` runs BEFORE the checkpoint binds: at
+    /// construction these projections hold random weights and are not yet `QuantizedLinear`, so
+    /// there is nothing to pack. Deferring to the first forward is what makes the packed form a
+    /// function of the loaded weights instead of a guess about them.
+    ///
+    /// Deliberately a plain box, not a `Module` and not `@ModuleInfo`: it corresponds to no
+    /// checkpoint key, and a module in the tree that binds no key is invisible to
+    /// `verify: [.noUnusedKeys]` while still costing full resident memory — the phantom-MTP-head
+    /// shape. `Module` reflection collects only `MLXArray`, `Module` and collections of those, so
+    /// this stays out of `parameters()` and `update(parameters:)`.
+    private var packedQKV: QuantizedProjectionGroup.Packed?
+    /// Whether packing has been attempted, so a refusal costs one check rather than one per token.
+    private var packedQKVAttempted = false
+    /// One announcement per process rather than one per layer. See `packedQKVProjection()`.
+    nonisolated(unsafe) private static var hasAnnouncedGrouping = false
+    /// Whether the three originals have been freed, which makes the stock path uncomputable.
+    private var originalsReleased = false
 
     @ModuleInfo(key: "q_conv1d") var qConv: Conv1d
     @ModuleInfo(key: "k_conv1d") var kConv: Conv1d
@@ -320,6 +346,69 @@ public final class BailingV3KDAAttention: Module {
         super.init()
     }
 
+    /// The packed `q|k|v` projection, building it on first call, or `nil` to use the three.
+    ///
+    /// A refusal is recorded once and reported once: a layer that silently declined to pack would
+    /// be indistinguishable from one that packed, and the whole point of this path is that it is
+    /// measurable. `groupedProjections` is read here rather than cached at init so that flipping it
+    /// on an already-built layer takes effect, which is how one layer gets measured both ways.
+    private func packedQKVProjection() -> QuantizedProjectionGroup.Packed? {
+        // Once the originals are freed the stock path cannot be computed, so the toggle stops being
+        // honoured rather than silently projecting through released storage.
+        if originalsReleased { return packedQKV }
+        guard groupedProjections else { return nil }
+        if packedQKVAttempted { return packedQKV }
+        packedQKVAttempted = true
+        switch QuantizedProjectionGroup.pack([qProj, kProj, vProj]) {
+        case .packed(let group):
+            packedQKV = group
+            // Announce the FIRST pack in the process, not every layer: 34 identical lines are noise,
+            // but zero lines would make "packing engaged" indistinguishable from "packing silently
+            // declined everywhere", which is precisely the difference an A/B against this path has
+            // to establish.
+            if !Self.hasAnnouncedGrouping {
+                Self.hasAnnouncedGrouping = true
+                let line =
+                    "[KDA] q|k|v projection grouping active: \(group.outputWidths) rows packed, "
+                    + "\(group.bits)b/g\(group.groupSize)\n"
+                FileHandle.standardError.write(Data(line.utf8))
+            }
+            releaseOriginalProjections(having: group)
+        case .refused(let why):
+            FileHandle.standardError.write(
+                Data("[KDA] q|k|v projection grouping declined: \(why)\n".utf8))
+        }
+        return packedQKV
+    }
+
+    /// Drop the three originals now that the packed copy carries their rows.
+    ///
+    /// `concatenated` COPIES, so without this the layer holds both forms — about 105 MB per layer
+    /// and ~3.6 GB across GLM-5.3's 34 KDA layers. That is the difference between this optimisation
+    /// being free and being a memory regression on a model that already peaks at 96 GB.
+    ///
+    /// The packed arrays are MATERIALISED FIRST, and that ordering is the whole trick. MLX is lazy:
+    /// `concatenated` returns a graph node that REFERENCES its inputs, so releasing the module's
+    /// handles before the node is computed would free nothing — the graph holds the last reference
+    /// and the originals stay resident until it is evaluated. Evaluate, then release.
+    ///
+    /// Parameters are replaced rather than assigned because `Linear.weight` is a `let`; the loader
+    /// writes it the same way, through `update(parameters:)`, which swaps the array's storage in
+    /// place. It runs with `verify: .none`, so a one-element stand-in is accepted for a
+    /// `[8192, 1024]` weight — which is the point.
+    private func releaseOriginalProjections(having group: QuantizedProjectionGroup.Packed) {
+        MLX.eval(group.weight, group.scales)
+        if let biases = group.biases { MLX.eval(biases) }
+
+        let spent = MLXArray.zeros([1])
+        for projection in [qProj, kProj, vProj] {
+            var stripped: [String: MLXArray] = ["weight": spent, "scales": spent]
+            if (projection as? QuantizedLinear)?.biases != nil { stripped["biases"] = spent }
+            projection.update(parameters: ModuleParameters.unflattened(stripped))
+        }
+        originalsReleased = true
+    }
+
     public func callAsFunction(
         _ x: MLXArray, mask: MLXArray? = nil, cache: MambaCache? = nil
     ) -> MLXArray {
@@ -328,7 +417,12 @@ public final class BailingV3KDAAttention: Module {
         let dtype = x.dtype
         let proj = projectionSize
 
-        var mixed = concatenated([qProj(x), kProj(x), vProj(x)], axis: -1)
+        // One packed projection when the three are compatible, else the three separately. The
+        // packed result IS the concatenation — same rows, same order — so everything downstream is
+        // unchanged.
+        var mixed =
+            packedQKVProjection().map { $0(x) }
+            ?? concatenated([qProj(x), kProj(x), vProj(x)], axis: -1)
         if let mask {
             mixed = MLX.where(
                 expandedDimensions(mask, axis: -1), mixed, MLXArray.zeros(like: mixed))
