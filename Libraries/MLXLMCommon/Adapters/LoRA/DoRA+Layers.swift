@@ -159,10 +159,47 @@ public class QDoRALinear: QuantizedLinear, LoRALayer {
         try super.freeze(recursive: recursive, keys: keys, strict: strict)
     }
 
+    /// The dequantized base weight, hydrated on first use and then kept.
+    ///
+    /// DoRA needs the DENSE base weight in its forward and cannot be rewritten to avoid it: the
+    /// output is scaled by `magnitude / norm(W + scale * Bt At, axis: 1)`, the per-row norms of the
+    /// ADAPTED matrix, which depend on `W` entry by entry. But `dequantizedWeight` is a COMPUTED
+    /// property on `QuantizedLinear` — every read reruns `dequantized` over the whole matrix. Reading
+    /// it from `callAsFunction` therefore rebuilt the full dense weight of every adapted layer on
+    /// EVERY token. Peak memory does not rise from keeping it, because an array that size was already
+    /// being materialized each time; this only stops discarding it.
+    ///
+    /// WHY THERE IS NO INVALIDATION, AND WHY THAT IS SAFE HERE. The obvious guard — compare the
+    /// source array's identity and re-hydrate when it changes — DOES NOT WORK in this runtime, and
+    /// looks like it does. `Module.update(parameters:)` writes through `MLXArray._updateInternal`,
+    /// which calls `mlx_array_set`, and that assigns the underlying C++ array IN PLACE
+    /// (`*static_cast<mlx::core::array*>(d.ctx) = s`). Neither the Swift object nor the `ctx` handle
+    /// changes, so an identity check silently reports "unchanged" across a real parameter update, and
+    /// mlx-c exposes no array id to key on instead. What makes the cache sound is narrower and
+    /// checkable: `weight` is frozen here (`freeze()` in `init`), so no optimizer writes it, and a
+    /// DoRA adapter file carries `lora_a`, `lora_b` and `m` — never the base weight. Nothing in the
+    /// load path rewrites `weight` after the first forward. If that ever changes, this cache goes
+    /// stale silently, so the invariant is worth keeping in mind rather than assuming.
+    ///
+    /// IT MUST START NIL. `Module` reflects over stored properties and `ModuleValue.build` maps any
+    /// NON-NIL `MLXArray` ivar to `.value(.parameters(...))`, while a nil optional maps to `.none`;
+    /// `_items` is then memoized on first use. Populated lazily, after loading, this stays out of
+    /// `parameters()`. Assigned in `init` it would become a phantom parameter that gets saved into
+    /// checkpoints and breaks key matching on load.
+    private var denseBaseWeight: MLXArray?
+
+    private func baseWeight() -> MLXArray {
+        if let cached = denseBaseWeight { return cached }
+        let dense = dequantizedWeight
+        eval(dense)
+        denseBaseWeight = dense
+        return dense
+    }
+
     public func fused() -> Module {
         QuantizedLinear(
             weight: fuse(
-                weight: dequantizedWeight, loraA: loraA, loraB: loraB, scale: scale,
+                weight: baseWeight(), loraA: loraA, loraB: loraB, scale: scale,
                 magnitude: magnitude),
             bias: bias, groupSize: groupSize, bits: bits
         )
@@ -174,7 +211,7 @@ public class QDoRALinear: QuantizedLinear, LoRALayer {
             mode: mode)
         return forward(
             x: x, y: y,
-            weight: dequantizedWeight, bias: bias,
+            weight: baseWeight(), bias: bias,
             loraA: loraA, loraB: loraB,
             scale: scale, magnitude: magnitude
         )
