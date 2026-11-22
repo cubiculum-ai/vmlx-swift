@@ -491,7 +491,6 @@ template <typename T> T prod(Simd<T, 1> x) { return x.value; }
 template <typename T> bool any(Simd<T, 1> x) { return x.value; }
 template <typename T> bool all(Simd<T, 1> x) { return x.value; }
 }
-
 namespace mlx::core::simd {
 constexpr float inf = std::numeric_limits<float>::infinity();
 template <typename T, int N>
