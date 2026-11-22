@@ -445,6 +445,19 @@ struct ReasoningCapabilityBundleTests {
         #expect(top.effort(for: top.defaultLevel) == "b")
     }
 
+    @Test("a nested block's reasoning_effort_supported:false withholds its later spellings")
+    func nestedFlagWithholdsLaterSpellings() throws {
+        // The raw reader this replaced checked the flag in whichever block it found, nested or
+        // top-level, before reading `supported_reasoning_efforts`. The nested read must too.
+        let block = #""supported_reasoning_efforts":["a","b","c"],"default_reasoning_effort":"b""#
+        let denied = try chatCapability(
+            chat: #""reasoning":{"supported":true,"reasoning_effort_supported":false,"# + block + "}")
+        #expect(denied.efforts.isEmpty)
+        let allowed = try chatCapability(chat: #""reasoning":{"supported":true,"# + block + "}")
+        #expect(allowed.efforts == ["a", "b", "c"])
+        #expect(allowed.effort(for: allowed.defaultLevel) == "b")
+    }
+
     @Test("a block that declares no efforts still outranks the flat spelling")
     func keylessBlockOutranksFlatSpelling() throws {
         // The app's reading of a block WITHOUT a vocabulary is "no effort control", not "ask the

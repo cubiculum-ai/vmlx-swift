@@ -2066,16 +2066,24 @@ public struct JangLoader: Sendable {
                 // inside `chat.reasoning`. Reading only the first left such a
                 // block with no list at all. The older names are read first, so
                 // a block that already parsed keeps meaning what it meant.
+                //
+                // Those later names come with the top-level block's flag:
+                // `reasoning_effort_supported: false` withholds them here as it
+                // does there.
+                let laterSpellingsDeclared =
+                    (rDict["reasoning_effort_supported"] as? Bool) != false
                 reasoning = JangChatReasoning(
                     supported: rDict["supported"] as? Bool,
                     modes: rDict["modes"] as? [String],
                     defaultMode: rDict["default_mode"] as? String,
                     defaultEffort: (rDict["default_effort"] as? String)
-                        ?? (rDict["default_reasoning_effort"] as? String),
+                        ?? (laterSpellingsDeclared
+                            ? rDict["default_reasoning_effort"] as? String : nil),
                     thinkingStart: rDict["thinking_start"] as? String,
                     thinkingEnd: rDict["thinking_end"] as? String,
                     reasoningEffortLevels: parseEffortLevels(rDict["reasoning_effort_levels"])
-                        ?? parseEffortLevels(rDict["supported_reasoning_efforts"])
+                        ?? (laterSpellingsDeclared
+                            ? parseEffortLevels(rDict["supported_reasoning_efforts"]) : nil)
                         ?? parseEffortLevels(rDict["efforts"]),
                     dropEarlierReasoning: rDict["drop_earlier_reasoning"] as? Bool,
                     templateFlag: rDict["template_flag"] as? String,

@@ -509,8 +509,8 @@ extension ReasoningCapability {
         // beside its weights, or embed the same block inside `config.json`. `JangLoader.loadConfig`
         // already resolves both (file first, then embedded), parses the nested `chat.reasoning` and
         // the top-level `reasoning` shapes, and hands back a typed value. Digging the raw JSON here
-        // made a second, weaker reader of exactly the same declaration, and it drifted: it missed
-        // the embedded form and the top-level spellings for as long as it existed.
+        // made a second reader of exactly the same declaration, so every spelling and every flag had
+        // to be taught to both, and the two could disagree about one bundle.
         //
         // The loader THROWS for a bundle with no JANG config, which is a precondition and not a
         // defect: `configNotFound` distinguishes "no JANG config" from "a config declaring nothing",
