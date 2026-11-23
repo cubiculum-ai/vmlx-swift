@@ -275,6 +275,23 @@ public enum KDAConvRuntime {
     }()
 }
 
+/// Gate for packing a KDA layer's `q|k|v` projections into ONE quantized projection.
+///
+/// A decode step runs three same-input projections and concatenates the results into the `[B, T, 3P]`
+/// buffer the fused convolution consumes — four commands producing a buffer one command can produce.
+/// Affine quantization metadata is per output row, so the packing is exact rather than an
+/// approximation; see ``QuantizedProjectionGroup``.
+///
+/// Default ON, matching the reference's `projection_groups`, with the same shape of explicit
+/// rollback as ``KDAConvRuntime``.
+public enum KDAProjectionGroupRuntime {
+    nonisolated(unsafe) public static var enabled: Bool = {
+        let v = ProcessInfo.processInfo.environment["VMLX_GLM5_PROJECTION_GROUPS"]?
+            .trimmingCharacters(in: .whitespaces).lowercased()
+        return !(["0", "false", "off", "no", ""].contains(v ?? "1"))
+    }()
+}
+
 /// Convolve + activate + shift one decode step, or return `nil` meaning "use the stock path".
 ///
 /// Returns `nil` for every shape, dtype or geometry it does not handle EXACTLY, rather than trying
