@@ -747,7 +747,8 @@ public final class Glm5NextSparseAttention: Module {
     private var wKV: MLXArray?
     private var wKBDType: DType?
 
-    private func kbFactors(dtype: DType) -> (MLXArray, MLXArray) {
+    /// Internal rather than private so that `Glm5NextKbFactorDTypeTests` can check the dtype.
+    func kbFactors(dtype: DType) -> (MLXArray, MLXArray) {
         if let k = wKNope, let v = wKV, wKBDType == dtype { return (k, v) }
         var w = kvBProj.weight
         if let q = kvBProj as? QuantizedLinear {

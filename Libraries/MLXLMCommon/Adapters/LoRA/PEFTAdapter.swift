@@ -50,8 +50,10 @@ enum PEFTAdapter {
     /// Three things change, and the last is the one that fails silently if it is wrong:
     ///
     ///   1. the `base_model.model.` wrapper PEFT adds is stripped;
-    ///   2. `…lora_A.weight` / `…lora_B.weight` become `…lora_a` / `…lora_b`;
-    ///   3. BOTH factors are TRANSPOSED.
+    ///   2. `…lora_A.weight` / `…lora_B.weight` become `…lora_a` / `…lora_b`, and a DoRA
+    ///      adapter's `…lora_magnitude_vector` (`…lora_magnitude_vector.weight` in older PEFT)
+    ///      becomes `…m`;
+    ///   3. BOTH factors are TRANSPOSED. The magnitudes are 1-D and stay as they are.
     ///
     /// On (3): `LoRALinear` stores `loraA` as `[in, rank]` and `loraB` as `[rank, out]`, and its
     /// forward is `y + scale * (x @ loraA @ loraB)`. PEFT stores the transpose of each — verified
@@ -60,18 +62,14 @@ enum PEFTAdapter {
     /// a shape mismatch or, where dimensions happen to agree, quietly compute a different function
     /// — which is why the round trip is checked numerically in the tests rather than by loading
     /// successfully.
-    /// On the MAGNITUDES: a DoRA adapter carries one `lora_magnitude_vector` per target, and
-    /// dropping them is not a harmless omission. `configuration(from:weights:)` reads `use_dora` and
-    /// builds `QDoRALinear`/`DoRALinear` layers either way, whose forward scales the output by
-    /// `magnitude / norm(W + scale * Bt At)`. With the trained magnitudes discarded, `magnitude`
-    /// keeps the value `init` derived from the BASE weight — so the adapter loads, generates, and
-    /// silently computes a different function than the one that was trained. PEFT writes the key
-    /// bare in current versions and with a `.weight` suffix in older ones; both are accepted. They
-    /// are 1-D, so the transpose below leaves them alone.
     ///
-    /// `dora` gates it because a plain LoRA model has no `m` slot: emitting the key there would fail
-    /// `load(into:)`'s `.noUnusedKeys` verification rather than being quietly ignored.
-    static func translate(weights: [String: MLXArray], dora: Bool = false) -> [String: MLXArray] {
+    /// On (2): `configuration(from:weights:)` builds DoRA layers when `use_dora` is set, and a DoRA
+    /// layer scales its output by `m / norm(W + scale * Bᵀ Aᵀ)`. A dropped magnitude leaves `m` at
+    /// the value the layer's `init` derives from the base weight, so the adapter loads, generates,
+    /// and computes a different function from the trained one. A magnitude in an adapter that is
+    /// not DoRA has no `m` slot to go to, so `load(into:)` throws on it (it matches no module)
+    /// rather than dropping it.
+    static func translate(weights: [String: MLXArray]) -> [String: MLXArray] {
         var out: [String: MLXArray] = [:]
         out.reserveCapacity(weights.count)
         for (key, value) in weights {
@@ -83,9 +81,9 @@ enum PEFTAdapter {
                 k = String(k.dropLast(".lora_A.weight".count)) + ".lora_a"
             } else if k.hasSuffix(".lora_B.weight") {
                 k = String(k.dropLast(".lora_B.weight".count)) + ".lora_b"
-            } else if dora, k.hasSuffix(".lora_magnitude_vector") {
+            } else if k.hasSuffix(".lora_magnitude_vector") {
                 k = String(k.dropLast(".lora_magnitude_vector".count)) + ".m"
-            } else if dora, k.hasSuffix(".lora_magnitude_vector.weight") {
+            } else if k.hasSuffix(".lora_magnitude_vector.weight") {
                 k = String(k.dropLast(".lora_magnitude_vector.weight".count)) + ".m"
             } else {
                 continue                       // biases, anything else: not ours
@@ -221,10 +219,8 @@ enum PEFTAdapter {
 /// orientation of the translated factors is precisely the thing that must be checked numerically
 /// rather than by a successful load. This exposes the three pure functions and nothing else.
 public enum PEFTAdapterTestBridge {
-    public static func translate(
-        _ weights: [String: MLXArray], dora: Bool = false
-    ) -> [String: MLXArray] {
-        PEFTAdapter.translate(weights: weights, dora: dora)
+    public static func translate(_ weights: [String: MLXArray]) -> [String: MLXArray] {
+        PEFTAdapter.translate(weights: weights)
     }
 
     public static func detect(_ configuration: Data) -> PEFTConfigurationBox? {

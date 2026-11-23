@@ -396,6 +396,18 @@ struct ReasoningCapabilityBundleTests {
         #expect(c.applying(level: 2)?["reasoning_effort"] as? String == "high")
     }
 
+    @Test("a flat list with one thinking effort and explicit off preserves both modes")
+    func flatSpellingSingleEffortWithOff() throws {
+        let c = try chatCapability(
+            chat: #""reasoning_efforts":["off","high"],"reasoning_effort_default":"off""#,
+            config: Self.supportsThinking, template: "{{ reasoning_effort|default('off') }}")
+        #expect(c.levels == [0, 1])
+        #expect(c.defaultLevel == 0)
+        #expect(c.applying(level: 0)?["reasoning_effort"] as? String == "off")
+        #expect(c.applying(level: 1)?["reasoning_effort"] as? String == "high")
+        #expect(c.applying(level: 1)?["enable_thinking"] == nil)
+    }
+
     @Test("the flat list is read trimmed and lowercased, default included")
     func flatSpellingIsNormalised() throws {
         let c = try chatCapability(

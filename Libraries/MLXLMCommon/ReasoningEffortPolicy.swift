@@ -452,7 +452,7 @@ public enum ReasoningCapabilityRegistry {
 
         // 2. The model's own declaration. Trusted over anything we could infer, and the reason a
         //    model that starts shipping a contract immediately supersedes our guess about it.
-        if declaredEfforts.count > 1 {
+        if declaredEfforts.count > 1 || (declaredEfforts.count == 1 && declaredOffEffort != nil) {
             return ReasoningCapability(
                 efforts: declaredEfforts, defaultEffort: declaredDefault,
                 supportsDisabling: (declaredSupportsDisabling ?? true) && supportsThinking != false,
@@ -576,11 +576,9 @@ extension ReasoningCapability {
             // A flat list is the model's whole scale, so it also says whether there is an off: only
             // an entry that IS one (see `flatEffortScale`) gives the model a level 0. The resolver's
             // usual "reasoning can be switched off unless `supports_thinking` says no" does not
-            // apply, or `[low, high, max]` would grow an off level in front of it. An
-            // `["off", "high"]` list is the edge: the off is removed, one effort is left, and one
-            // effort is below the resolver's own threshold for a scale, so it reads as no scale at
-            // all. The default travels with the list that supplied the vocabulary and with nothing
-            // else.
+            // apply, or `[low, high, max]` would grow an off level. Conversely, `[off, high]`
+            // is a complete scale: the template takes the named effort for each of its two modes.
+            // The default travels with the declaration that supplied the vocabulary.
             if efforts.count < 2 {
                 contract = reasoningModes(jangConfig?.capabilities?.reasoningModes,
                                           thinkingDefault: chatCfg?.thinking?.defaultEnabled)

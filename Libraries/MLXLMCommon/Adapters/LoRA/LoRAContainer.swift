@@ -141,7 +141,7 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
         let configuration: LoRAConfiguration
         let weights: [String: MLXArray]
         if let peft = PEFTAdapter.detect(configuration: configurationData) {
-            weights = PEFTAdapter.translate(weights: raw, dora: peft.useDora ?? false)
+            weights = PEFTAdapter.translate(weights: raw)
             configuration = PEFTAdapter.configuration(from: peft, weights: weights)
         } else {
             configuration = try JSONDecoder()
@@ -185,13 +185,9 @@ public struct LoRAContainer: ModelAdapter, @unchecked Sendable {
             verify: .noUnusedKeys
         )
 
-        // Re-propagate the model's CURRENT training mode over the layers `replaceLayers` just
-        // built. `Module.training` defaults to true on a freshly constructed layer, so an adapter
-        // applied to a model already in eval mode left its own new layers claiming to be training —
-        // which is not cosmetic: `QDoRALinear` uses exactly that flag to decide whether hydrating
-        // DoRA's rescaling vector once is safe, so the layers that most need it were the ones that
-        // never got it. Passing `model.training` rather than `false` keeps this correct for a
-        // trainer that loads an adapter to carry on training.
+        // `replaceLayers` built the adapter layers new, and a new `Module` starts in training mode.
+        // Give them the model's mode: eval for a loaded model, training for a trainer that loads
+        // an adapter to continue training it.
         model.train(model.training)
     }
 

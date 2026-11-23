@@ -1438,16 +1438,11 @@ public func loadWeights(
                 + "} lm_head={" + parameterDTypeSummary(matching: "lm_head") + "}\n").utf8))
     }
 
-    // EVAL MODE, which the reference sets and this port did not. `mlx_lm.utils` calls `model.eval()`
-    // at the end of load (twice, on both paths); `Module.training` here defaults to TRUE and nothing
-    // in this tree ever cleared it, so every loaded model sat in training mode for inference.
-    //
-    // Two consequences. `Dropout` is the identity only in eval mode, so any model carrying one with
-    // a non-zero rate was sampling a random mask per forward — FastVLM is the one that builds them,
-    // from config rates that are 0.0 in the shipped checkpoints, which is why this has not shown up
-    // as visible damage. And a layer cannot otherwise tell inference from training, which is what
-    // `QDoRALinear` needs in order to know when hydrating DoRA's rescaling vector once is safe: the
-    // cached form severs the gradient through that norm, so it must never be taken while training.
+    // Inference runs in eval mode, as in the reference: mlx_lm's and mlx_vlm's loaders call
+    // `model.eval()`. `Module.training` starts true, and before this nothing cleared it, so every
+    // loaded model ran its forward in training mode. That changes what layers compute:
+    // `BatchNorm` normalizes with the batch's own statistics and overwrites its running statistics
+    // on every call (FastVLM's vision tower), and `Dropout` draws a fresh random mask.
     model.train(false)
 
     eval(model)

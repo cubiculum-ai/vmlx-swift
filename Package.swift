@@ -998,6 +998,7 @@ let package = Package(
                 "CacheCoordinatorTopologyFocusedTests.swift",
                 "NativeDiskDurabilityTests.swift",
                 "NativeForwardedStopTailTests.swift",
+                "FinalFlushStopReasonTests.swift",
                 "DiskStoreOffsetConsistencyFocusedTests.swift",
                 "ExpertDownProjectionQuantOrderTests.swift",
                 "VMLXUmbrellaProductTests.swift",

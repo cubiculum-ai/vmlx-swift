@@ -781,43 +781,31 @@ public class DiffusionGemmaModel: Module, LLMModel, ModalityBearing {
     public var visionEmbedderModule: Module? { model.encoder.embedVision }
     public var imageTokenId: Int? { config.imageTokenId }
 
-    /// The tied embedding table in a form the soft-embedding contraction can use, hydrated at most
-    /// once rather than on every denoising step.
+    /// Self-conditioning's soft embedding: `probs @ W` over the tied embedding table `W`
+    /// `[vocab, hidden]`, in `dtype`.
     ///
-    /// WHY IT MUST BE DEQUANTIZED AT ALL: the tied head ships quantized in some bundles (e.g. Gemma 4
-    /// QAT q6). Its packed `.weight` is grouped along the HIDDEN axis, while `probs @ W` contracts
-    /// over the VOCAB axis, so this is not a valid quantized matmul — it collapses the signal to a
-    /// 0-D scalar and crashes the MoE router on denoising step >= 2. Dense bundles keep using the
-    /// plain weight and never allocate anything here.
+    /// A quantized table is never dequantized. Its groups run along the hidden axis, the last axis
+    /// of `W`, and `quantizedMatmul` with `transpose: false` computes `x @ W` for exactly that
+    /// layout, contracting over the vocabulary. With the default `transpose: true` it would
+    /// contract over the hidden axis, as the tied head does, which is the wrong product here.
     ///
-    /// WHY IT IS CACHED: the caller runs once per denoising step, up to 48 per canvas, and every step
-    /// but the first supplies self-conditioning logits. Rebuilding the table each time dequantized the
-    /// WHOLE vocabulary x hidden matrix per step — GiB-scale at Gemma's 262144-entry vocabulary. This
-    /// costs no extra PEAK memory, because an array that size was already being materialized on every
-    /// step; it only stops throwing it away. Nothing is allocated for a bundle whose embedding is
-    /// dense, since the guard returns before the cache is ever touched.
+    /// The caller runs once per denoising step, up to 48 per canvas, and every step but the first
+    /// supplies self-conditioning logits. Dequantizing the table there built the whole
+    /// vocabulary x hidden matrix on each of those steps: 1.48 GB at Gemma 4's 262144 entries.
+    /// Caching that matrix would instead keep it resident for the model's lifetime.
     ///
-    /// WHY THE DTYPE IS EXPLICIT: `dequantized` types its output as `result_type(scales, biases)` for
-    /// affine bundles, NOT as the activation dtype — so a bundle with float16 scales in a bfloat16
-    /// model would hand back float16, and the caller's `asType` would then convert the entire table
-    /// on every step, since `asType` short-circuits only on an exact match. Same defect fixed in
-    /// `Glm5NextSparseAttention.kbFactors`; asking for the target dtype here forecloses it.
-    private var softEmbedTable: MLXArray?
-    private var softEmbedTableDType: DType?
-
-    private func softEmbeddingTable(dtype: DType) -> MLXArray {
-        guard let qEmbed = model.decoder.embedTokens as? QuantizedEmbedding else {
-            return model.decoder.embedTokens.weight
+    /// Affine `quantizedMatmul` computes in the promotion of `x`'s dtype and the scales', and
+    /// converts `x`, the scales and the biases to it; `x` in the scales' dtype converts nothing.
+    /// The other modes compute in `x`'s dtype.
+    static func softEmbeddings(_ probs: MLXArray, table: Embedding, dtype: DType) -> MLXArray {
+        guard let q = table as? QuantizedEmbedding else {
+            return probs.asType(dtype).matmul(table.weight.asType(dtype))
         }
-        if let cached = softEmbedTable, softEmbedTableDType == dtype { return cached }
-        let table = dequantized(
-            qEmbed.weight, scales: qEmbed.scales, biases: qEmbed.biases,
-            groupSize: qEmbed.groupSize, bits: qEmbed.bits, mode: qEmbed.mode,
-            dtype: dtype)
-        eval(table)
-        softEmbedTable = table
-        softEmbedTableDType = dtype
-        return table
+        let xDType = q.mode == .affine ? q.scales.dtype : dtype
+        return quantizedMatmul(
+            probs.asType(xDType), q.weight, scales: q.scales, biases: q.biases,
+            transpose: false, groupSize: q.groupSize, bits: q.bits, mode: q.mode
+        ).asType(dtype)
     }
 
     func decoderForwardInternal(
@@ -830,8 +818,8 @@ public class DiffusionGemmaModel: Module, LLMModel, ModalityBearing {
         if let logits = selfConditioningLogits {
             // Soft embeddings from the previous step's logits.
             let probs = softmax(logits.asType(.float32), axis: -1, precise: true)
-            let embedTable = softEmbeddingTable(dtype: embeds.dtype)
-            let soft = probs.asType(embeds.dtype).matmul(embedTable.asType(embeds.dtype))
+            let soft = Self.softEmbeddings(
+                probs, table: model.decoder.embedTokens, dtype: embeds.dtype)
             signal = soft * model.decoder.embedScale(embeds.dtype)
         } else {
             signal = MLXArray.zeros(embeds.shape, dtype: embeds.dtype)
