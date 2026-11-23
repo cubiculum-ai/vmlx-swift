@@ -2,41 +2,53 @@
 # Copyright © 2026 Osaurus AI. All rights reserved.
 # SPDX-License-Identifier: MIT
 #
-# run-cpu-kernel-tests.sh: build the Highway test build and run VMLXCPUKernelTests twice, with
-# MLX_CPU_THREADS=1 and with the default pool, as CI does. Linux only.
+# run-cpu-kernel-tests.sh (Linux only): build the kernel tests, with Highway unless
+# VMLX_NO_HIGHWAY=1, and run VMLXCPUKernelTests twice, with MLX_CPU_THREADS=1 and with the default
+# pool, as CI does.
 #
 #   scripts/run-cpu-kernel-tests.sh [--expect "<Highway targets>"] [--sde <chip>] [--skip-build]
 #                                    [--filter <swift-testing filter>] [--once] [--stall <seconds>]
+#                                    [--sanitize thread]
 #
 # The test build (VMLX_HWY_ALL_TARGETS=1, release) compiles every attainable Highway target, EMU128
-# included. VMLX_EXPECT_HWY_TARGETS, the targets this host must execute, is --expect's value, or else
-# Highway's own detection of this CPU (scripts/hwy-supported-targets.cc, compiled with $CXX, by
-# default g++) intersected with the targets Highway 1.4.0 attains on this architecture, plus EMU128.
-# It never comes from what the build contains.
+# included. VMLX_EXPECT_HWY_TARGETS, the targets this host must execute, is --expect's value, or
+# else Highway's own detection of this CPU (scripts/hwy-supported-targets.cc, compiled with $CXX, by
+# default g++) intersected with the targets Highway 1.4.0 attains on this architecture, less the SVE
+# family that Package.swift disables on arm64, plus EMU128. It never comes from what the build
+# contains.
 # --sde runs the probe and the tests under Intel SDE, emulating <chip> (for example spr).
 # --filter narrows the tests (default: the whole target); --once runs only the default pool, for
-# emulated runs, which are slow. A run whose log stops growing for --stall seconds (default 1200) is
-# killed with everything it started: a hung kernel must not hold a runner forever.
-# VMLX_KERNEL_TESTS_SCRATCH moves the build (default .build/hwy-all), for a mutated build beside it.
+# emulated and sanitized runs, which are slow. A run whose log stops growing for --stall seconds
+# (default 1200) is killed with everything it started: a hung kernel must not hold a runner forever.
+# --sanitize thread builds with SwiftPM's --sanitize=thread, the one sanitizer tried so far (another
+# name is a usage error), in the scratch path .build/hwy-all-thread (.build/no-hwy-thread with
+# VMLX_NO_HIGHWAY=1). It checks that the test executable holds ThreadSanitizer's runtime
+# (`__tsan_init`), and prints a GitHub warning annotation when it does not: an uninstrumented run
+# would pass.
+# VMLX_KERNEL_TESTS_SCRATCH moves the build (default .build/hwy-all, or as --sanitize and
+# VMLX_NO_HIGHWAY say), for a mutated build beside it.
+# VMLX_NO_HIGHWAY=1 (Package.swift) builds without Highway; the expectation is then `none`, and the
+# default scratch path `.build/no-hwy`.
 #
 # Exits 0 when every configuration passed. Otherwise with the first failing configuration's status:
-# 124 when it stalled, 69 when no test matched the filter, and else the test executable's own (1 for
-# a failed test). Exits 2 for a usage error, a missing test executable or a missing probe compiler.
+# 124 when it stalled, 69 when no test matched the filter, and else the test executable's own: 1 for
+# a failed test, 66 when ThreadSanitizer reported (its exit code). Exits 2 for a usage error, a
+# missing test executable or a missing probe compiler.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-SCRATCH="${VMLX_KERNEL_TESTS_SCRATCH:-$ROOT/.build/hwy-all}"
 EXPECT=""
 SDE=""
 BUILD=1
 FILTER=VMLXCPUKernelTests
 CONFIGURATIONS="1 default"
 STALL=1200
+SANITIZE=""
 usage() {
-  echo "usage: $0 [--expect '<targets>'] [--sde <chip>] [--skip-build] [--filter <filter>] [--once] [--stall <s>]" >&2
+  echo "usage: $0 [--expect '<targets>'] [--sde <chip>] [--skip-build] [--filter <filter>] [--once] [--stall <s>] [--sanitize thread]" >&2
   exit 2
 }
 while [ $# -gt 0 ]; do
-  case "$1" in --expect | --sde | --filter | --stall) [ $# -ge 2 ] || usage ;; esac
+  case "$1" in --expect | --sde | --filter | --stall | --sanitize) [ $# -ge 2 ] || usage ;; esac
   case "$1" in
     --expect) EXPECT=$2; shift 2 ;;
     --sde) SDE=$2; shift 2 ;;
@@ -44,13 +56,18 @@ while [ $# -gt 0 ]; do
     --filter) FILTER=$2; shift 2 ;;
     --once) CONFIGURATIONS=default; shift ;;
     --stall) STALL=$2; shift 2 ;;
+    --sanitize) [ "$2" = thread ] || usage; SANITIZE=$2; shift 2 ;;
     *) usage ;;
   esac
 done
+if [ "${VMLX_NO_HIGHWAY:-}" = 1 ]; then DEFAULT_SCRATCH=$ROOT/.build/no-hwy; else DEFAULT_SCRATCH=$ROOT/.build/hwy-all; fi
+if [ -n "$SANITIZE" ]; then DEFAULT_SCRATCH=$DEFAULT_SCRATCH-$SANITIZE; fi # .build/hwy-all-thread, .build/no-hwy-thread
+SCRATCH="${VMLX_KERNEL_TESTS_SCRATCH:-$DEFAULT_SCRATCH}"
 # The tests expect the int8 switch off at the start, and judge the polynomial bounds, which
 # VMLX_ULP_BASELINE=1 would only measure.
 unset MLX_CPU_QUANTIZED_INT8 VMLX_ULP_BASELINE
 SWIFT_FLAGS=(--package-path "$ROOT" --scratch-path "$SCRATCH" -c release -Xswiftc -enable-testing)
+if [ -n "$SANITIZE" ]; then SWIFT_FLAGS+=("--sanitize=$SANITIZE"); fi
 export VMLX_HWY_ALL_TARGETS=1
 if [ "$BUILD" = 1 ]; then
   swift build "${SWIFT_FLAGS[@]}" --build-tests
@@ -62,6 +79,15 @@ BIN=$(swift build "${SWIFT_FLAGS[@]}" --show-bin-path)
 TEST_BIN=$(find "$BIN" -maxdepth 1 -type f -perm -u+x \( -name 'VMLXCPUKernelTests-test-runner' -o -name '*PackageTests.xctest' \) -printf '%T@ %p\n' 2> /dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)
 [ -n "$TEST_BIN" ] || { echo "no test executable in $BIN" >&2; exit 2; }
 echo "Tests: $TEST_BIN"
+# A sanitized build is proven by its runtime's entry point, which needs no report.
+if [ "$SANITIZE" = thread ]; then
+  syms=$( { nm "$TEST_BIN"; nm -D "$TEST_BIN"; } 2> /dev/null || true)
+  if grep -qw __tsan_init <<< "$syms"; then
+    echo "ThreadSanitizer: $TEST_BIN holds __tsan_init"
+  else
+    echo "::warning::$TEST_BIN holds no __tsan_init: not built with ThreadSanitizer"
+  fi
+fi
 # The emulator's command prefix, empty without --sde.
 SDE_RUN=()
 if [ -n "$SDE" ]; then SDE_RUN=(sde64 "-$SDE" --); fi
@@ -89,13 +115,25 @@ watched() {
   wait "$pid" || rc=$?
   return "$rc"
 }
-echo "CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- || true)"
+# ARM's /proc/cpuinfo names no model: take lscpu's vendor and model names there (several on
+# big.LITTLE), and the CPU features that decide Highway's NEON targets.
+if [ "$(uname -m)" = aarch64 ]; then
+  CPU=$(LC_ALL=C lscpu 2> /dev/null | awk -F': +' '/^Vendor ID:/ {v = $2} /^Model name:/ {m = m (m == "" ? "" : ", ") $2} END {print v " " m}' || true)
+  FEATURES=$(grep -m1 '^Features' /proc/cpuinfo | cut -d: -f2- | tr ' ' '\n' | grep -xE 'aes|asimdhp|asimddp|bf16' | paste -sd ' ' - || true)
+  echo "CPU: $CPU (features: $FEATURES)"
+else
+  echo "CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- || true)"
+fi
+# A build without Highway (Package.swift's VMLX_NO_HIGHWAY) executes no Highway target.
+if [ -z "$EXPECT" ] && [ "${VMLX_NO_HIGHWAY:-}" = 1 ]; then EXPECT=none; fi
 if [ -z "$EXPECT" ]; then
   case "$(uname -m)" in
     # Highway 1.4.0 marks AVX10_2 broken below Clang 23 (hwy/detect_targets.h), so Swift 6.4's
     # Clang 21 attains the rest. Add AVX10_2 when the toolchain's Clang reaches 23.
     x86_64) ATTAINABLE="AVX3_SPR AVX3_ZEN4 AVX3_DL AVX3 AVX2 SSE4 SSSE3 SSE2" ;;
-    *) ATTAINABLE="" ;; # no Highway kernels off x86-64 yet
+    # No SVE: the build disables it (Package.swift) until the kernels are vector-length agnostic.
+    aarch64) ATTAINABLE="NEON_BF16 NEON NEON_WITHOUT_AES" ;;
+    *) ATTAINABLE="" ;; # no Highway kernels elsewhere
   esac
   if [ -n "$ATTAINABLE" ]; then
     H="$ROOT/Source/Cmlx/highway"
@@ -128,9 +166,11 @@ for threads in $CONFIGURATIONS; do
   watched "$log" "${SDE_RUN[@]}" "$TEST_BIN" --testing-library swift-testing --filter "$FILTER" || rc=$?
   echo "== MLX_CPU_THREADS=$threads: exit $rc, $(grep -E 'Test run with' "$log" | tail -1)"
   if [ "$rc" = 0 ] && grep -Eq 'Test run with [1-9][0-9]* tests? .*passed' "$log"; then continue; fi
-  # Each recorded issue with the values swift-testing prints under it (↳), and any stall or crash.
+  # Each recorded issue with the values swift-testing prints under it (↳), any stall or crash, and a
+  # sanitizer's distinct summaries, startup failure and closing count.
   awk '/recorded an issue/ {show = 1; print; next} show && /^↳/ {print; next} {show = 0}
-    /STALLED|[Ff]atal error|error:/ {print}' "$log" | head -40 || true
+    /^SUMMARY: [A-Za-z]+Sanitizer/ {if (!seen[$0]++) print; next}
+    /STALLED|[Ff]atal error|error:|^FATAL: |CHECK failed|Sanitizer: reported/ {print}' "$log" | head -40 || true
   if [ "$STALLED" = 1 ]; then
     rc=124
   elif [ "$rc" = 69 ]; then
