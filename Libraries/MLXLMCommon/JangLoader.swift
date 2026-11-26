@@ -1738,12 +1738,18 @@ public struct JangLoader: Sendable {
     /// real-world snapshots: `TokenizersBackend` on Qwen-family VL
     /// models is functionally `Qwen2Tokenizer`.
     public static let defaultTokenizerClassSubstitutions: [String: String] = [
+        "ErnieChatTokenizer": "PreTrainedTokenizer",
         "TokenizersBackend": "Qwen2Tokenizer",
         // Kimi K2.x/K2.5/K2.6 bundles may ship a tiktoken.model plus a
         // generated tokenizer.json. swift-transformers does not register
         // TikTokenTokenizer as a class name, but the generated tokenizer
         // is a standard byte-level BPE tokenizer.
         "TikTokenTokenizer": "Qwen2Tokenizer",
+        // transformers 5 writes the Qwen3.5 class name into qwen3_5 /
+        // qwen3_5_moe exports (e.g. mlx-community Holo-3.1 and Holo4). Their
+        // tokenizer.json is the Qwen3.5 byte-level BPE that Qwen2Tokenizer
+        // bundles of the same family ship.
+        "Qwen3_5Tokenizer": "Qwen2Tokenizer",
     ]
 
     /// Like `resolveTokenizerDirectory(for:)` but also fixes

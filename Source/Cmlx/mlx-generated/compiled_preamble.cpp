@@ -613,16 +613,27 @@ Simd<T, N> erf(Simd<T, N> x) {
       out[i] = std::erf(x[i]);
     }
     return out;
+  } else {
+    Simd<float, N> a = x;
+    auto t = abs(a);
+    auto s = a * a;
+    auto p = fma(Simd<float, N>(-5.96761703e-4f), s, 4.99119423e-3f);
+    p = fma(p, s, -2.67681349e-2f);
+    p = fma(p, s, 1.12819925e-1f);
+    p = fma(p, s, -3.76125336e-1f);
+    p = fma(p, s, 1.28379166e-1f);
+    p = fma(p, a, a);
+    auto r = fma(Simd<float, N>(-1.72853470e-5f), t, 3.83197126e-4f);
+    auto u = fma(Simd<float, N>(-3.88396438e-3f), t, 2.42546219e-2f);
+    r = fma(r, s, u);
+    r = fma(r, t, -1.06777877e-1f);
+    r = fma(r, t, -6.34846687e-1f);
+    r = fma(r, t, -1.28717512e-1f);
+    r = fma(r, t, -t);
+    r = -expm1(r);
+    r = select(a < 0.0f, -r, r);
+    return Simd<T, N>(select(t > 0.927734375f, r, p));
   }
-  Simd<float, N> v = x;
-  auto t = recip(fma(Simd<float, N>(0.3275911f), abs(v), 1.0f));
-  auto r = fma(Simd<float, N>(1.061405429f), t, -1.453152027f);
-  r = fma(r, t, 1.421413741f);
-  r = fma(r, t, -0.284496736f);
-  r = fma(r, t, 0.254829592f);
-  auto e = -exp(-v * v);
-  auto result = Simd<T, N>(fma(e * t, r, 1.0f));
-  return select(x > 0, result, -result);
 }
 template <typename T, int N>
 Simd<T, N> erfinv(Simd<T, N> a_) {
