@@ -15,7 +15,7 @@ struct PEFTDoRAMagnitudeTests {
     private static let prefix = "base_model.model.model.layers.0.mlp.down_proj"
 
     @Test(
-        "a magnitude translates to `m`, 1-D and unchanged, in both PEFT spellings",
+        "a magnitude becomes `m`, 1-D and unchanged, under PEFT's key and under the state-dict key",
         arguments: ["lora_magnitude_vector", "lora_magnitude_vector.weight"])
     func magnitudeTranslates(spelling: String) {
         let out = PEFTAdapterTestBridge.translate([

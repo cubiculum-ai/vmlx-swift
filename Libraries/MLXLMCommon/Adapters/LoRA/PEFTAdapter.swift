@@ -51,8 +51,9 @@ enum PEFTAdapter {
     ///
     ///   1. the `base_model.model.` wrapper PEFT adds is stripped;
     ///   2. `…lora_A.weight` / `…lora_B.weight` become `…lora_a` / `…lora_b`, and a DoRA
-    ///      adapter's `…lora_magnitude_vector` (`…lora_magnitude_vector.weight` in older PEFT)
-    ///      becomes `…m`;
+    ///      adapter's `…lora_magnitude_vector` becomes `…m`: the key PEFT saves, or
+    ///      `…lora_magnitude_vector.weight`, the module's own name for it since PEFT's
+    ///      DoRA refactor (PR 1806, May 2024), which a plain `state_dict()` dump keeps;
     ///   3. BOTH factors are TRANSPOSED. The magnitudes are 1-D and stay as they are.
     ///
     /// On (3): `LoRALinear` stores `loraA` as `[in, rank]` and `loraB` as `[rank, out]`, and its

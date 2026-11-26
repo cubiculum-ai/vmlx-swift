@@ -127,8 +127,8 @@ inline bool operator>(const complex64_t& a, const complex64_t& b) {
   return (a.real() > b.real()) || (a.real() == b.real() && a.imag() > b.imag());
 }
 inline complex64_t operator%(complex64_t a, complex64_t b) {
-  auto real = a.real() - (b.real() * static_cast<int64_t>(a.real() / b.real()));
-  auto imag = a.imag() - (b.imag() * static_cast<int64_t>(a.imag() / b.imag()));
+  auto real = std::fmod(a.real(), b.real());
+  auto imag = std::fmod(a.imag(), b.imag());
   if (real != 0 && ((real < 0) != (b.real() < 0)))
     real += b.real();
   if (imag != 0 && ((imag < 0) != (b.imag() < 0)))
@@ -492,6 +492,13 @@ template <typename T> bool any(Simd<T, 1> x) { return x.value; }
 template <typename T> bool all(Simd<T, 1> x) { return x.value; }
 }
 namespace mlx::core::simd {
+template <typename To, typename From>
+inline To bit_cast(const From& from) {
+  static_assert(sizeof(To) == sizeof(From));
+  To to;
+  __builtin_memcpy(&to, &from, sizeof(To));
+  return to;
+}
 constexpr float inf = std::numeric_limits<float>::infinity();
 template <typename T, int N>
 Simd<T, N> exp(Simd<T, N> in) {
@@ -517,8 +524,9 @@ Simd<T, N> exp(Simd<T, N> in) {
     x = fma(x, fpart, 6.931472028550421e-1f);
     x = fma(x, fpart, 1.000000000000000f);
     Simd<float, N> magic = ipart + 12583039.0f;
-    auto epart = (*(Simd<uint32_t, N>*)&magic) << 23;
-    auto result = select(isnan(x_init), x_init, (*(Simd<float, N>*)&epart) * x);
+    auto epart = bit_cast<Simd<uint32_t, N>>(magic) << 23;
+    auto result =
+        select(isnan(x_init), x_init, bit_cast<Simd<float, N>>(epart) * x);
     result = select(x_init > 88.0f, Simd<float, N>(inf), result);
     result = select(x_init < -88.0f, Simd<float, N>(0), result);
     return Simd<T, N>(result);
@@ -744,13 +752,28 @@ template <int N>
 Simd<uint32_t, N> fp32_to_bits(Simd<float, N> x) {
   return *(Simd<uint32_t, N>*)(&x);
 }
+template <int N>
+Simd<float, N> narrow_round_to_odd(Simd<double, N> x) {
+  Simd<float, N> f = x;
+  Simd<double, N> back = f;
+  auto bits = fp32_to_bits(f);
+  auto needs_fix = (back != x) && ((bits & 1u) == 0u);
+  auto overshot = abs(back) > abs(x);
+  auto fixed = select(overshot, bits - 1u, bits + 1u);
+  return fp32_from_bits(select(needs_fix, fixed, bits));
+}
 struct ToFP8 {
   template <typename T, int N>
   Simd<uint8_t, N> operator()(Simd<T, N> f) {
     uint32_t fp8_max = 543 << 21;
     auto denorm_mask = Simd<uint32_t, N>(141 << 23);
     Simd<uint32_t, N> f_bits;
-    Simd<float, N> f32 = f;
+    Simd<float, N> f32;
+    if constexpr (std::is_same_v<T, double>) {
+      f32 = narrow_round_to_odd(f);
+    } else {
+      f32 = f;
+    }
     f_bits = fp32_to_bits(f32);
     Simd<uint8_t, N> result = 0u;
     auto sign = f_bits & 0x80000000;
